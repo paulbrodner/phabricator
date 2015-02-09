@@ -10,8 +10,8 @@ final class PhabricatorPhameApplication extends PhabricatorApplication {
     return '/phame/';
   }
 
-  public function getIconName() {
-    return 'phame';
+  public function getFontIcon() {
+    return 'fa-star';
   }
 
   public function getShortDescription() {
@@ -50,7 +50,7 @@ final class PhabricatorPhameApplication extends PhabricatorApplication {
           'preview/' => 'PhamePostPreviewController',
           'framed/(?P<id>\d+)/' => 'PhamePostFramedController',
           'new/' => 'PhamePostNewController',
-          'move/(?P<id>\d+)/' => 'PhamePostNewController'
+          'move/(?P<id>\d+)/' => 'PhamePostNewController',
         ),
         'blog/' => array(
           '(?:(?P<filter>user|all)/)?' => 'PhameBlogListController',

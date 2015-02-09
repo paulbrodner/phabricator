@@ -13,11 +13,21 @@ final class PhabricatorRepositoryCommitData extends PhabricatorRepositoryDAO {
   protected $commitMessage = '';
   protected $commitDetails = array();
 
-  public function getConfiguration() {
+  protected function getConfiguration() {
     return array(
       self::CONFIG_TIMESTAMPS => false,
       self::CONFIG_SERIALIZATION => array(
         'commitDetails' => self::SERIALIZATION_JSON,
+      ),
+      self::CONFIG_COLUMN_SCHEMA => array(
+        'authorName' => 'text',
+        'commitMessage' => 'text',
+      ),
+      self::CONFIG_KEY_SCHEMA => array(
+        'commitID' => array(
+          'columns' => array('commitID'),
+          'unique' => true,
+        ),
       ),
     ) + parent::getConfiguration();
   }
@@ -31,7 +41,7 @@ final class PhabricatorRepositoryCommitData extends PhabricatorRepositoryDAO {
     $summary = phutil_split_lines($message, $retain_endings = false);
     $summary = head($summary);
     $summary = id(new PhutilUTF8StringTruncator())
-      ->setMaximumCodepoints(self::SUMMARY_MAX_LENGTH)
+      ->setMaximumBytes(self::SUMMARY_MAX_LENGTH)
       ->truncateString($summary);
 
     return $summary;

@@ -17,7 +17,9 @@ abstract class PhabricatorRepositoryCommitMessageParserWorker
       $data = new PhabricatorRepositoryCommitData();
     }
     $data->setCommitID($commit->getID());
-    $data->setAuthorName((string)$author);
+    $data->setAuthorName(id(new PhutilUTF8StringTruncator())
+      ->setMaximumBytes(255)
+      ->truncateString((string)$author));
 
     $data->setCommitDetail('authorName', $ref->getAuthorName());
     $data->setCommitDetail('authorEmail', $ref->getAuthorEmail());
@@ -53,11 +55,12 @@ abstract class PhabricatorRepositoryCommitMessageParserWorker
 
     $differential_app = 'PhabricatorDifferentialApplication';
     $revision_id = null;
+    $low_level_query = null;
     if (PhabricatorApplication::isClassInstalled($differential_app)) {
-      $field_values = id(new DiffusionLowLevelCommitFieldsQuery())
+      $low_level_query = id(new DiffusionLowLevelCommitFieldsQuery())
         ->setRepository($repository)
-        ->withCommitRef($ref)
-        ->execute();
+        ->withCommitRef($ref);
+      $field_values = $low_level_query->execute();
       $revision_id = idx($field_values, 'revisionID');
 
       if (!empty($field_values['reviewedByPHIDs'])) {
@@ -81,9 +84,15 @@ abstract class PhabricatorRepositoryCommitMessageParserWorker
     // aren't. Autoclose can be disabled for various reasons at the repository
     // or commit levels.
 
-    $autoclose_reason = $repository->shouldSkipAutocloseCommit($commit);
+    $force_autoclose = idx($this->getTaskData(), 'forceAutoclose', false);
+    if ($force_autoclose) {
+      $autoclose_reason = $repository::BECAUSE_AUTOCLOSE_FORCED;
+    } else {
+      $autoclose_reason = $repository->shouldSkipAutocloseCommit($commit);
+    }
     $data->setCommitDetail('autocloseReason', $autoclose_reason);
-    $should_autoclose = $repository->shouldAutocloseCommit($commit);
+    $should_autoclose = $force_autoclose ||
+                        $repository->shouldAutocloseCommit($commit);
 
 
     // When updating related objects, we'll act under an omnipotent user to
@@ -123,7 +132,7 @@ abstract class PhabricatorRepositoryCommitMessageParserWorker
             'precommitRevisionStatus',
             $revision->getStatus());
         }
-        $commit_drev = PhabricatorEdgeConfig::TYPE_COMMIT_HAS_DREV;
+        $commit_drev = DiffusionCommitHasRevisionEdgeType::EDGECONST;
         id(new PhabricatorEdgeEditor())
           ->addEdge($commit->getPHID(), $commit_drev, $revision->getPHID())
           ->save();
@@ -160,9 +169,15 @@ abstract class PhabricatorRepositoryCommitMessageParserWorker
           $commit_close_xaction->setMetadataValue(
             'authorName',
             $data->getAuthorName());
-          $commit_close_xaction->setMetadataValue(
-            'commitHashes',
-            $hashes);
+
+          if ($low_level_query) {
+            $commit_close_xaction->setMetadataValue(
+              'revisionMatchData',
+              $low_level_query->getRevisionMatchData());
+            $data->setCommitDetail(
+              'revisionMatchData',
+              $low_level_query->getRevisionMatchData());
+          }
 
           $diff = $this->generateFinalDiff($revision, $acting_as_phid);
 
@@ -256,7 +271,7 @@ abstract class PhabricatorRepositoryCommitMessageParserWorker
       $changes = array();
     }
 
-    $diff = DifferentialDiff::newFromRawChanges($changes)
+    $diff = DifferentialDiff::newFromRawChanges($viewer, $changes)
       ->setRepositoryPHID($this->repository->getPHID())
       ->setAuthorPHID($actor_phid)
       ->setCreationMethod('commit')
@@ -360,7 +375,6 @@ abstract class PhabricatorRepositoryCommitMessageParserWorker
         }
         $drequest = DiffusionRequest::newFromDictionary(array(
           'user' => PhabricatorUser::getOmnipotentUser(),
-          'initFromConduit' => false,
           'repository' => $this->repository,
           'commit' => $this->commit->getCommitIdentifier(),
           'path' => $path,
@@ -387,8 +401,8 @@ abstract class PhabricatorRepositoryCommitMessageParserWorker
         //   -echo "test";
         //   -(empty line)
 
-        $hunk = id(new DifferentialHunkModern())->setChanges($context);
-        $vs_hunk = id(new DifferentialHunkModern())->setChanges($vs_context);
+        $hunk = id(new DifferentialModernHunk())->setChanges($context);
+        $vs_hunk = id(new DifferentialModernHunk())->setChanges($vs_context);
         if ($hunk->makeOldFile() != $vs_hunk->makeOldFile() ||
             $hunk->makeNewFile() != $vs_hunk->makeNewFile()) {
           return $vs_diff;
@@ -450,13 +464,14 @@ abstract class PhabricatorRepositoryCommitMessageParserWorker
     $tasks = id(new ManiphestTaskQuery())
       ->setViewer($actor)
       ->withIDs(array_keys($task_statuses))
+      ->needProjectPHIDs(true)
       ->execute();
 
     foreach ($tasks as $task_id => $task) {
       $xactions = array();
 
       $edge_type = ManiphestTaskHasCommitEdgeType::EDGECONST;
-      $xactions[] = id(new ManiphestTransaction())
+      $edge_xaction = id(new ManiphestTransaction())
         ->setTransactionType(PhabricatorTransactions::TYPE_EDGE)
         ->setMetadataValue('edge:type', $edge_type)
         ->setNewValue(
@@ -471,22 +486,14 @@ abstract class PhabricatorRepositoryCommitMessageParserWorker
         if ($task->getStatus() != $status) {
           $xactions[] = id(new ManiphestTransaction())
             ->setTransactionType(ManiphestTransaction::TYPE_STATUS)
+            ->setMetadataValue('commitPHID', $commit->getPHID())
             ->setNewValue($status);
 
-          $commit_name = $repository->formatCommitName(
-            $commit->getCommitIdentifier());
-
-          $status_message = pht(
-            'Closed by commit %s.',
-            $commit_name);
-
-          $xactions[] = id(new ManiphestTransaction())
-            ->setTransactionType(PhabricatorTransactions::TYPE_COMMENT)
-            ->attachComment(
-              id(new ManiphestTransactionComment())
-                ->setContent($status_message));
+          $edge_xaction->setMetadataValue('commitPHID', $commit->getPHID());
         }
       }
+
+      $xactions[] = $edge_xaction;
 
       $content_source = PhabricatorContentSource::newForSource(
         PhabricatorContentSource::SOURCE_DAEMON,

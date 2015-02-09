@@ -122,6 +122,10 @@ final class PhabricatorStartup {
     self::setupPHP();
     self::verifyPHP();
 
+    // If we've made it this far, the environment isn't completely broken so
+    // we can switch over to relying on our own exception recovery mechanisms.
+    ini_set('display_errors', 0);
+
     if (isset($_SERVER['REMOTE_ADDR'])) {
       self::rateLimitRequest($_SERVER['REMOTE_ADDR']);
     }
@@ -400,7 +404,8 @@ final class PhabricatorStartup {
     // Replace superglobals with unfiltered versions, disrespect php.ini (we
     // filter ourselves)
     $filter = array(INPUT_GET, INPUT_POST,
-      INPUT_SERVER, INPUT_ENV, INPUT_COOKIE);
+      INPUT_SERVER, INPUT_ENV, INPUT_COOKIE,
+    );
     foreach ($filter as $type) {
       $filtered = filter_input_array($type, FILTER_UNSAFE_RAW);
       if (!is_array($filtered)) {
